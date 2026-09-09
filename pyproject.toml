@@ -221,6 +221,7 @@ conflicts = [
 yam-abc-gui = "yam_abc_reproduce.cli:gui"
 yam-abc-teleop = "yam_abc_reproduce.cli:teleop"
 yam-abc-convert = "yam_abc_reproduce.cli:convert"
+yam-abc-prepare-subsets = "yam_abc_reproduce.cli:prepare_subsets"
 yam-abc-viz = "yam_abc_reproduce.cli:viz"
 yam-abc-cameras = "yam_abc_reproduce.cli:cameras"
 yam-abc-deploy = "yam_abc_reproduce.deploy.run:deploy"

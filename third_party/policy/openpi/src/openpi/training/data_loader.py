@@ -1,12 +1,16 @@
 from collections.abc import Iterator, Sequence
+import importlib
 import logging
 import multiprocessing
 import os
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 
+import datasets as hf_datasets
 import jax
 import jax.numpy as jnp
+import lerobot.datasets.dataset_reader as lerobot_dataset_reader
+import lerobot.datasets.feature_utils as lerobot_feature_utils
 import lerobot.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
@@ -17,6 +21,88 @@ from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
 
 T_co = TypeVar("T_co", covariant=True)
+
+
+_LEROBOT_GET_HF_FEATURES = lerobot_feature_utils.get_hf_features_from_features
+
+
+def _get_hf_features_with_language_compat(features: dict) -> hf_datasets.Features:
+    """Backport LeRobot's language-column schema support to LeRobot 0.5.1.
+
+    ABC-130K was written with the ``language_persistent`` and ``language_events``
+    columns introduced after LeRobot 0.5.1.  That release passes the metadata
+    dtype ``language`` to ``datasets.Value``, which fails before the dataset can
+    be loaded.  OpenPI does not consume these columns, but Hugging Face Datasets
+    still needs their real nested schema in order to read the parquet files.
+
+    This is the same feature mapping used by newer LeRobot releases.  Keep the
+    shim local to DatasetReader so the pinned LeRobot dependency remains intact.
+    """
+    language_features = {key: ft for key, ft in features.items() if ft.get("dtype") == "language"}
+    if not language_features:
+        return _LEROBOT_GET_HF_FEATURES(features)
+
+    hf_features = _LEROBOT_GET_HF_FEATURES(
+        {key: ft for key, ft in features.items() if ft.get("dtype") != "language"}
+    )
+    json_feature = hf_datasets.Json() if hasattr(hf_datasets, "Json") else hf_datasets.Value("string")
+
+    for key in language_features:
+        row_features: dict[str, object] = {
+            "role": hf_datasets.Value("string"),
+            "content": hf_datasets.Value("string"),
+            "style": hf_datasets.Value("string"),
+            "camera": hf_datasets.Value("string"),
+            "tool_calls": hf_datasets.List(json_feature),
+        }
+        if key == "language_persistent":
+            row_features["timestamp"] = hf_datasets.Value("float32")
+        elif key != "language_events":
+            raise ValueError(f"Unsupported LeRobot language column: {key}")
+        hf_features[key] = hf_datasets.List(row_features)
+
+    return hf_features
+
+
+# DatasetReader imported this helper by name, so replacing its module-local
+# reference is enough to make LeRobot 0.5.1 understand newer v3 datasets.  The
+# assignment also runs in spawned data-loader workers when this module imports.
+lerobot_dataset_reader.get_hf_features_from_features = _get_hf_features_with_language_compat
+
+
+def _remove_unused_lerobot_language_columns(
+    dataset: hf_datasets.Dataset, features: dict
+) -> hf_datasets.Dataset:
+    """Remove nested language fields before LeRobot converts every value to a tensor.
+
+    OpenPI gets its prompt from ``task_index`` and does not consume LeRobot's
+    optional language fields. LeRobot 0.5.1 nevertheless sends every loaded
+    column through ``torch.tensor`` before OpenPI's repack transform can discard
+    unused fields. Newer datasets store language entries as nested dictionaries,
+    which ``torch.tensor`` cannot convert.
+    """
+    language_columns = [
+        key
+        for key, feature in features.items()
+        if feature.get("dtype") == "language" and key in dataset.column_names
+    ]
+    if not language_columns:
+        return dataset
+    return dataset.remove_columns(language_columns)
+
+
+_LEROBOT_LOAD_HF_DATASET = lerobot_dataset_reader.DatasetReader._load_hf_dataset  # noqa: SLF001
+
+
+def _load_hf_dataset_without_unused_language(self):
+    dataset = _LEROBOT_LOAD_HF_DATASET(self)
+    return _remove_unused_lerobot_language_columns(dataset, self._meta.features)
+
+
+# Episode filtering builds an index mapping inside LeRobotDataset.__init__.
+# Drop language columns before that mapping triggers the tensor transform.
+# Hook the common load path so cache loading and load_and_activate both work.
+lerobot_dataset_reader.DatasetReader._load_hf_dataset = _load_hf_dataset_without_unused_language  # noqa: SLF001
 
 
 class Dataset(Protocol[T_co]):
@@ -137,14 +223,15 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.lerobot_root)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
+        root=data_config.lerobot_root,
+        tolerance_s=data_config.lerobot_tolerance_s,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
     )
-
     if data_config.prompt_from_task:
         # lerobot v3.0 exposes .tasks as a DataFrame (index=task str, col "task_index");
         # PromptFromLeRobotTask wants dict[int, str]. Coerce if needed (v2.1 gave a dict).
@@ -486,6 +573,27 @@ def _worker_init_fn(worker_id: int) -> None:
     # means that this approach will not work for selecting the backend.
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+    _shrink_lerobot_decoder_cache()
+
+
+def _shrink_lerobot_decoder_cache() -> None:
+    """Bound LeRobot's per-worker video decoder cache.
+
+    LeRobot keeps 32 open ``VideoDecoder`` objects per process, each holding an
+    fsspec handle on a video file.  ABC-130K averages 173 MB per file across
+    38k files, so a full cache costs several GB per worker while the hit rate is
+    effectively zero: a shuffled 256-sample batch touches a fresh set of
+    episodes every step.  Left at the default this pins the job against its
+    cgroup memory limit, and the reclaim storm that follows turns Orbax's
+    host-side checkpoint staging into a multi-hour stall with the GPUs idle.
+    """
+    max_size = int(os.environ.get("LEROBOT_DECODER_CACHE_SIZE", "4"))
+    video_utils = importlib.import_module("lerobot.datasets.video_utils")
+    video_utils.VideoDecoderCache.__init__.__defaults__ = (max_size,)
+    cache = getattr(video_utils, "_default_decoder_cache", None)
+    if cache is not None:
+        # The cache trims itself down to _max_size on the next lookup.
+        cache._max_size = max_size  # noqa: SLF001
 
 
 class RLDSDataLoader:

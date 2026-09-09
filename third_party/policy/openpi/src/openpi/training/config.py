@@ -66,6 +66,12 @@ class AssetsConfig:
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
+    # Optional explicit root of a local LeRobot dataset. When set, the loader reads
+    # directly from this directory instead of resolving repo_id under HF_LEROBOT_HOME.
+    lerobot_root: str | None = None
+    # Maximum allowed difference, in seconds, between requested and decoded
+    # LeRobot video timestamps. Keep the default aligned with LeRobot.
+    lerobot_tolerance_s: float = 1e-4
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -368,6 +374,17 @@ class LeRobotYamDataConfig(DataConfigFactory):
     # the action dim and the delta mask so a single-arm dataset trains without the
     # 14-D bimanual layout being hardcoded.
     num_arms: int = 2
+    # Source feature names. The defaults match datasets converted by this repo;
+    # published datasets can override them without duplicating the YAM transforms.
+    top_image_key: str = "observation.images.top_rgb"
+    left_wrist_image_key: str = "observation.images.left_rgb"
+    right_wrist_image_key: str = "observation.images.right_rgb"
+    # Optional exact local dataset directory. This is useful for large, separately
+    # downloaded datasets and avoids an unnecessary Hugging Face Hub lookup.
+    lerobot_root: str | None = None
+    # Forwarded to LeRobot's video timestamp matching. Some long concatenated
+    # videos require a slightly larger value because LeRobot compares float32 times.
+    lerobot_tolerance_s: float = 1e-4
     assets: AssetsConfig = dataclasses.field(default_factory=lambda: AssetsConfig(asset_id="yam"))
 
     @override
@@ -377,9 +394,9 @@ class LeRobotYamDataConfig(DataConfigFactory):
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        "observation/image": "observation.images.top_rgb",
-                        "observation/left_wrist": "observation.images.left_rgb",
-                        "observation/right_wrist": "observation.images.right_rgb",
+                        "observation/image": self.top_image_key,
+                        "observation/left_wrist": self.left_wrist_image_key,
+                        "observation/right_wrist": self.right_wrist_image_key,
                         "observation/state": "observation.state",
                         "actions": "action",
                         # Carry the prompt through (PromptFromLeRobotTask sets it from
@@ -404,6 +421,8 @@ class LeRobotYamDataConfig(DataConfigFactory):
         model_transforms = ModelTransformFactory()(model_config)
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
+            lerobot_root=self.lerobot_root,
+            lerobot_tolerance_s=self.lerobot_tolerance_s,
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
@@ -569,6 +588,9 @@ class TrainConfig:
     log_interval: int = 100
     # How often (in steps) to save checkpoints.
     save_interval: int = 1000
+    # Maximum number of ordinary checkpoints to retain. Checkpoints protected by
+    # keep_period are retained in addition to this limit.
+    max_to_keep: int | None = 1
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
 
@@ -793,6 +815,25 @@ _CONFIGS = [
             pi05=True, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         ema_decay=None,
+    ),
+    TrainConfig(
+        # Full pi0.5 fine-tuning on the local ABC-130K LeRobot v3 dataset.
+        name="pi05_abc130k",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotYamDataConfig(
+            repo_id="abc_130k_v3_train",
+            lerobot_root="/projects/work/yang-lab/projects/pretrain_world_model/abc_130k_v3_train",
+            lerobot_tolerance_s=1e-3,
+            top_image_key="observation.images.top",
+            left_wrist_image_key="observation.images.left_wrist",
+            right_wrist_image_key="observation.images.right_wrist",
+            assets=AssetsConfig(asset_id="abc130k_yam"),
+            base_config=DataConfig(prompt_from_task=True, action_sequence_keys=("action",)),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=256,
+        num_workers=16,
+        num_train_steps=30_000,
     ),
     TrainConfig(
         name="pi0_libero_low_mem_finetune",

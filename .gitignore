@@ -28,3 +28,13 @@ venv/
 .idea/
 .vscode/
 .backup/
+
+# Local credentials
+/.secrets/
+
+# outputs
+logs/
+outputs/
+
+# tests
+tests/

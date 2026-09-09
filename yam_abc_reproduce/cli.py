@@ -70,6 +70,13 @@ def convert(argv: list[str] | None = None) -> None:
     convert_episode(args.src, to=args.to, repo_id=args.repo_id, out=args.out)
 
 
+def prepare_subsets(argv: list[str] | None = None) -> None:
+    """Create nested ABC-130K manifests and convert a selected prefix to LeRobot."""
+    from .data.abc130k_subset import main
+
+    main(argv)
+
+
 def viz(argv: list[str] | None = None) -> None:
     """Visualize a converted LeRobot dataset (Reron viewer) for a sanity check."""
     from .data.visualize import visualize_lerobot

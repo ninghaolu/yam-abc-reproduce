@@ -170,6 +170,10 @@ match the config's Input transform. π<sub>0</sub> and π<sub>0.5</sub> run thro
 stack with identical knobs — pick the backend in the GUI (`pi0` / `pi0.5`), which maps to the
 openpi configs `pi0_yam` / `pi0_yam_lora` and `pi05_yam` / `pi05_yam_lora` respectively.
 
+For direct π0.5 training on a Slurm GPU node, including the shared cache exports, normalization
+step, fresh/resume behavior, and a complete job template, see
+[Launch π0.5 OpenPI training on the cluster](pi05_openpi_hpc.md).
+
 `--repo-id` is simply **which dataset** — it's used for the convert output and passed to
 training as `--data.repo-id`. You do **not** need to keep it consistent for normalization:
 the YAM config pins a fixed `asset_id` (`yam`), so `compute_norm_stats` writes and the server
