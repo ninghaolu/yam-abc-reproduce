@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from pathlib import Path
 
 import numpy as np
 
@@ -95,6 +96,11 @@ def main() -> None:
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--config", required=True, help="openpi TrainConfig name (config.get_config)")
     p.add_argument("--checkpoint", required=True, help="checkpoint dir (local or gs://)")
+    p.add_argument(
+        "--norm-stats-path",
+        default=None,
+        help="local norm_stats.json override for task-specific checkpoint assets",
+    )
     p.add_argument("--prompt", default=None, help="default prompt if obs lacks one")
     p.add_argument("--device", default=None, help="pytorch device for torch checkpoints")
     p.add_argument(
@@ -121,11 +127,19 @@ def main() -> None:
     from openpi.training import config as _config
 
     train_config = _config.get_config(args.config)
+    norm_stats = None
+    if args.norm_stats_path is not None:
+        from openpi.shared import normalize
+
+        norm_stats_path = Path(args.norm_stats_path).expanduser().resolve(strict=True)
+        norm_stats = normalize.deserialize_json(norm_stats_path.read_text())
+        log.info("loading normalization stats from %s", norm_stats_path)
 
     policy = policy_config.create_trained_policy(
         train_config,
         args.checkpoint,
         default_prompt=args.prompt,
+        norm_stats=norm_stats,
         pytorch_device=args.device,
     )
     wrapped = RemapPolicy(policy, _parse_key_map(args.image_key_map), args.flatten_prefix, args.state_key)

@@ -41,12 +41,14 @@ SERVER_SCRIPT="$REPO_ROOT/yam_abc_reproduce/deploy/servers/openpi_server.py"
 EVAL_SCRIPT="$REPO_ROOT/scripts/eval_openpi_mujoco.py"
 OPENPI_CLIENT_SRC="$OPENPI_ROOT/packages/openpi-client/src"
 
-CHECKPOINT="${CHECKPOINT:-$OPENPI_ROOT/checkpoints/pi05_abc130k_task/pi05_abc_throw_the_plastic_bottles_in_the_bin_16923749/8000}"
-# The task launcher changed only the transient training run name. Architecture,
-# transforms, camera mapping, and asset ID remain those of this registered base config.
+CHECKPOINT="${CHECKPOINT:-$OPENPI_ROOT/checkpoints/pi05_abc130k_task/pi05_abc_put_the_plastic_bottles_in_the_bin_17183582/29000}"
+# Task checkpoints share this base config's architecture, transforms, and camera
+# mapping. Set NORM_STATS_ASSET_ID to the task's asset directory when needed.
 CONFIG_NAME="${CONFIG_NAME:-pi05_abc130k}"
+NORM_STATS_ASSET_ID="${NORM_STATS_ASSET_ID:-put_the_plastic_bottles_in_the_bin}"
+NORM_STATS_PATH="$CHECKPOINT/assets/$NORM_STATS_ASSET_ID/norm_stats.json"
 # Match this task-specific checkpoint's training prompt.
-PROMPT="${PROMPT:-throw the plastic bottles in the bin}"
+PROMPT="${PROMPT:-put the plastic bottles in the bin}"
 NUM_WORLDS="${NUM_WORLDS:-1}"
 NUM_CHUNKS="${NUM_CHUNKS:-120}"
 EXECUTE_CHUNK_DIM="${EXECUTE_CHUNK_DIM:-15}"
@@ -95,8 +97,8 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
     echo "ERROR: checkpoint params manifest is missing: $CHECKPOINT/params/manifest.ocdbt" >&2
     exit 2
 }
-[[ -s "$CHECKPOINT/assets/abc130k_yam/norm_stats.json" ]] || {
-    echo "ERROR: checkpoint normalization stats are missing" >&2
+[[ -s "$NORM_STATS_PATH" ]] || {
+    echo "ERROR: checkpoint normalization stats are missing: $NORM_STATS_PATH" >&2
     exit 2
 }
 
@@ -110,6 +112,7 @@ echo "pi0.5 checkpoint in ABC MuJoCo"
 echo "job_id=${SLURM_JOB_ID:-not-in-slurm} host=$(hostname)"
 echo "checkpoint=$CHECKPOINT"
 echo "config_name=$CONFIG_NAME"
+echo "norm_stats_path=$NORM_STATS_PATH"
 echo "prompt=$PROMPT"
 echo "server=$SERVER_HOST:$SERVER_PORT"
 echo "output_dir=$OUTPUT_DIR"
@@ -139,6 +142,7 @@ cd "$OPENPI_ROOT"
     --port "$SERVER_PORT" \
     --config "$CONFIG_NAME" \
     --checkpoint "$CHECKPOINT" \
+    --norm-stats-path "$NORM_STATS_PATH" \
     --prompt "$PROMPT" \
     --image-key-map "top=image,left=left_wrist,right=right_wrist" \
     --flatten-prefix "observation/" \
