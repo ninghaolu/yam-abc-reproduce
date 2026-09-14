@@ -13,7 +13,7 @@
 #SBATCH --time=08:00:00
 #SBATCH --export=ALL
 
-# Validation action error for a trained pi0.5 checkpoint, scored on the held-out
+# Validation action error and training flow loss for a trained pi0.5 checkpoint, scored on the held-out
 # abc_130k_v3_val split.  This is an offline evaluation: it does not touch the
 # training loop and does not write into the checkpoint directory.
 #
@@ -32,6 +32,10 @@
 #
 # Quick smoke test on a few batches:
 #   MAX_BATCHES=4 sbatch slurm/eval_abc_pi05_action_error.bash
+#
+# Statistics default to the checkpoint's saved assets (global or task-specific).
+# Override explicitly with NORM_STATS_PATH=/.../<task>/norm_stats.json.
+# COMPUTE_VAL_LOSS=0 restores action-error-only evaluation.
 
 set -euo pipefail
 
@@ -57,8 +61,8 @@ export LD_LIBRARY_PATH="${FFMPEG_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 export LEROBOT_DECODER_CACHE_SIZE="${LEROBOT_DECODER_CACHE_SIZE:-4}"
 
 BASE_CONFIG="${BASE_CONFIG:-pi05_abc130k}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-${OPENPI_DIR}/checkpoints/pi05_abc130k_task/pi05_abc_throw_the_plastic_bottles_in_the_bin_16923749/2000}"
-TASK_NAME="${TASK_NAME:-throw the plastic bottles in the bin}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-${OPENPI_DIR}/checkpoints/pi05_abc130k_task/pi05_abc_put_the_plastic_bottles_in_the_bin_17183582/4000}"
+TASK_NAME="${TASK_NAME:-put the plastic bottles in the bin}"
 VAL_REPO_ID="${VAL_REPO_ID:-abc_130k_v3_val}"
 VAL_ROOT="${VAL_ROOT:-/projects/work/yang-lab/projects/pretrain_world_model/abc_130k_v3_val}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
@@ -69,6 +73,7 @@ NUM_DENOISING_STEPS="${NUM_DENOISING_STEPS:-10}"
 SEED="${SEED:-0}"
 FSDP_DEVICES="${FSDP_DEVICES:-1}"
 DRY_RUN="${DRY_RUN:-0}"
+COMPUTE_VAL_LOSS="${COMPUTE_VAL_LOSS:-1}"
 
 EVAL_ARGS=(
     --checkpoint-dir "${CHECKPOINT_DIR}"
@@ -87,6 +92,12 @@ if [[ -n "${MAX_BATCHES:-}" ]]; then
 fi
 if [[ -n "${OUTPUT:-}" ]]; then
     EVAL_ARGS+=(--output "${OUTPUT}")
+fi
+if [[ -n "${NORM_STATS_PATH:-}" ]]; then
+    EVAL_ARGS+=(--norm-stats-path "${NORM_STATS_PATH}")
+fi
+if [[ "${COMPUTE_VAL_LOSS}" == "0" ]]; then
+    EVAL_ARGS+=(--no-compute-val-loss)
 fi
 
 if [[ ! -d "${CHECKPOINT_DIR}/params" ]]; then
@@ -112,6 +123,8 @@ echo "num_denoising_steps=${NUM_DENOISING_STEPS}"
 echo "max_batches=${MAX_BATCHES:-all}"
 echo "seed=${SEED}"
 echo "dry_run=${DRY_RUN}"
+echo "compute_val_loss=${COMPUTE_VAL_LOSS}"
+echo "norm_stats_path=${NORM_STATS_PATH:-auto-from-checkpoint}"
 echo "============================================================"
 
 if [[ "${DRY_RUN}" == "1" ]]; then

@@ -48,7 +48,7 @@ class OpenPIMujocoEvalConfig:
     camera_height: int = 168
     camera_width: int = 224
     gpu_id: int | None = 0
-    prompt: str = "throw the plastic bottles in the bin"
+    prompt: str = "put the plastic bottles in the bin"
     save_video: bool = True
     video_fps: int = 30
     video_every_n_actions: int = 1
