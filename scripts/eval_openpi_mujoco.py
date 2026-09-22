@@ -3,12 +3,13 @@
 
 This process intentionally contains no JAX/OpenPI model code. The policy is
 served by ``openpi_server.py`` from the OpenPI environment, while this client
-uses the independently validated ABC/MuJoCo-Warp environment.
+runs the ABC/MuJoCo-Warp simulator in a separate process.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -19,7 +20,7 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = REPO_ROOT.parent
-ABC_ROOT = WORKSPACE_ROOT / "abc"
+ABC_ROOT = Path(os.environ.get("ABC_ROOT", str(WORKSPACE_ROOT / "abc"))).expanduser().resolve()
 OPENPI_CLIENT_SRC = REPO_ROOT / "third_party" / "policy" / "openpi" / "packages" / "openpi-client" / "src"
 for source_root in (ABC_ROOT, OPENPI_CLIENT_SRC):
     source = str(source_root)

@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 
 #SBATCH --job-name=pi05_mujoco
-#SBATCH --chdir=/projects/work/yang-lab/projects/policy-finetuning/yam-abc-reproduce
-#SBATCH --account=torch_pr_147_courant
-#SBATCH --output=/projects/work/yang-lab/projects/policy-finetuning/policy-finetuning-logs/pi05-mujoco/%x-%j.out
-#SBATCH --error=/projects/work/yang-lab/projects/policy-finetuning/policy-finetuning-logs/pi05-mujoco/%x-%j.err
+#SBATCH --chdir=/home/alex/policy-finetuning/yam-abc-reproduce
+#SBATCH --partition=defq
+#SBATCH --exclude=cld2-bom-comp004
+#SBATCH --output=/home/alex/policy-finetuning/policy-finetuning-logs/pi05-mujoco/%x-%j.out
+#SBATCH --error=/home/alex/policy-finetuning/policy-finetuning-logs/pi05-mujoco/%x-%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 
-#SBATCH --gres=gpu:l40s:1
+#SBATCH --gres=gpu:1
 #SBATCH --requeue
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=192G
@@ -17,39 +18,76 @@
 set -euo pipefail
 umask 027
 
-# This launcher deliberately uses two isolated Python environments on one GPU:
-#   1. yam-abc-reproduce/.venv serves the OpenPI/JAX checkpoint;
-#   2. ../abc/.venv runs the validated ABC MuJoCo-Warp environment.
+# Two processes share one GPU and default to the project .venv:
+#   1. the OpenPI/JAX checkpoint server;
+#   2. the ABC MuJoCo-Warp simulator (SIM_PYTHON can override its interpreter).
+# Required simulation additions: mujoco-warp==3.10.0.3 warp-lang==1.15.0.
+# Before submitting, create the Slurm log directory:
+#   mkdir -p /home/alex/policy-finetuning/policy-finetuning-logs/pi05-mujoco
 # JAX preallocation is disabled so the simulator can share the allocated GPU.
 #
 # Two-chunk integration smoke (includes a short three-camera video):
-#   NUM_CHUNKS=2 sbatch slurm/eval_openpi_mujoco.bash
+#   NUM_WORLDS=1 NUM_CHUNKS=2 sbatch slurm/eval_openpi_mujoco.bash
 #
-# One complete randomized rollout with video (the defaults):
-#   sbatch slurm/eval_openpi_mujoco.bash
+# One complete randomized rollout with video:
+#   NUM_WORLDS=1 sbatch slurm/eval_openpi_mujoco.bash
 #
-# Upstream-scale comparison, 20 randomized worlds with a video for every world:
+# Default: 20 randomized worlds with a video for every world:
 #   NUM_WORLDS=20 sbatch slurm/eval_openpi_mujoco.bash
+# Reuse a validation sweep's frozen checkpoint manifest (one checkpoint per task):
+#   CHECKPOINT_MANIFEST=/absolute/path/to/manifest.json \
+#     sbatch --array=0-10%11 slurm/eval_openpi_mujoco.bash
 
-WORKSPACE_ROOT=/projects/work/yang-lab/projects/policy-finetuning
+WORKSPACE_ROOT=/home/alex/policy-finetuning
 REPO_ROOT="$WORKSPACE_ROOT/yam-abc-reproduce"
 OPENPI_ROOT="$REPO_ROOT/third_party/policy/openpi"
-ABC_ROOT="$WORKSPACE_ROOT/abc"
+ABC_ROOT="${ABC_ROOT:-$WORKSPACE_ROOT/abc}"
 OPENPI_PYTHON="$REPO_ROOT/.venv/bin/python"
-SIM_PYTHON="$ABC_ROOT/.venv/bin/python"
+SIM_PYTHON="${SIM_PYTHON:-$OPENPI_PYTHON}"
+source "$REPO_ROOT/.venv/bin/activate"
+export ABC_ROOT
 SERVER_SCRIPT="$REPO_ROOT/yam_abc_reproduce/deploy/servers/openpi_server.py"
 EVAL_SCRIPT="$REPO_ROOT/scripts/eval_openpi_mujoco.py"
 OPENPI_CLIENT_SRC="$OPENPI_ROOT/packages/openpi-client/src"
 
-CHECKPOINT="${CHECKPOINT:-$OPENPI_ROOT/checkpoints/pi05_abc130k_task/pi05_abc_put_the_plastic_bottles_in_the_bin_17183582/29000}"
-# Task checkpoints share this base config's architecture, transforms, and camera
-# mapping. Set NORM_STATS_ASSET_ID to the task's asset directory when needed.
+CHECKPOINT="${CHECKPOINT:-/projects/data/datasets/checkpoints/pi05_abc130k/pi05_abc130k_all_data_lr1e-5_91/8000}"
+if [[ -n "${CHECKPOINT_MANIFEST:-}" ]]; then
+    CHECKPOINT="$("$OPENPI_PYTHON" - "$CHECKPOINT_MANIFEST" "${SLURM_ARRAY_TASK_ID:?Use --array with CHECKPOINT_MANIFEST}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as stream:
+    entries = json.load(stream)["checkpoints"]
+index = int(sys.argv[2])
+if not 0 <= index < len(entries):
+    raise ValueError(f"Checkpoint index {index} is out of range")
+entry = entries[index]
+if entry["group"] == "abc_dit":
+    raise ValueError("This launcher requires an OpenPI checkpoint")
+print(entry["checkpoint"])
+PY
+)"
+fi
 CONFIG_NAME="${CONFIG_NAME:-pi05_abc130k}"
-NORM_STATS_ASSET_ID="${NORM_STATS_ASSET_ID:-put_the_plastic_bottles_in_the_bin}"
-NORM_STATS_PATH="$CHECKPOINT/assets/$NORM_STATS_ASSET_ID/norm_stats.json"
-# Match this task-specific checkpoint's training prompt.
+# Prefer an explicit statistics path/asset; otherwise discover the saved stats.
+# All-data checkpoints normally contain assets/abc130k_yam/norm_stats.json.
+if [[ -z "${NORM_STATS_PATH:-}" ]]; then
+    if [[ -n "${NORM_STATS_ASSET_ID:-}" ]]; then
+        NORM_STATS_PATH="$CHECKPOINT/assets/$NORM_STATS_ASSET_ID/norm_stats.json"
+    else
+        shopt -s nullglob
+        STATS_PATHS=("$CHECKPOINT"/assets/*/norm_stats.json)
+        shopt -u nullglob
+        if (( ${#STATS_PATHS[@]} != 1 )); then
+            echo "ERROR: expected one checkpoint norm_stats.json; set NORM_STATS_PATH explicitly." >&2
+            exit 2
+        fi
+        NORM_STATS_PATH="${STATS_PATHS[0]}"
+    fi
+fi
+# Evaluate the bottles scene with its matching task prompt.
 PROMPT="${PROMPT:-put the plastic bottles in the bin}"
-NUM_WORLDS="${NUM_WORLDS:-1}"
+NUM_WORLDS="${NUM_WORLDS:-20}"
 NUM_CHUNKS="${NUM_CHUNKS:-120}"
 EXECUTE_CHUNK_DIM="${EXECUTE_CHUNK_DIM:-15}"
 SCENE_SEED="${SCENE_SEED:-20260511}"
@@ -62,7 +100,8 @@ VIDEO_EVERY_N_ACTIONS="${VIDEO_EVERY_N_ACTIONS:-1}"
 CHECKPOINT_STEP="${CHECKPOINT##*/}"
 CHECKPOINT_PARENT="${CHECKPOINT%/*}"
 CHECKPOINT_RUN="${CHECKPOINT_PARENT##*/}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/outputs/pi05_mujoco/${CHECKPOINT_RUN}/step-${CHECKPOINT_STEP}/job-${SLURM_JOB_ID:-manual}}"
+MUJOCO_OUTPUT_ROOT="${MUJOCO_OUTPUT_ROOT:-/projects/data/cloud_user/mujoco_eval_outputs/pi05-all-data}"
+OUTPUT_DIR="${OUTPUT_DIR:-$MUJOCO_OUTPUT_ROOT/${CHECKPOINT_RUN}/step-${CHECKPOINT_STEP}/job-${SLURM_JOB_ID:-manual}}"
 
 JOB_NUMBER="${SLURM_JOB_ID:-1}"
 if [[ ! "$JOB_NUMBER" =~ ^[0-9]+$ ]]; then
@@ -73,15 +112,15 @@ SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
 SERVER_PORT="${SERVER_PORT:-$((18000 + JOB_NUMBER % 10000))}"
 
 CACHE_ROOT="${CACHE_ROOT:-$WORKSPACE_ROOT/openpi-cache}"
-export HF_HOME="${HF_HOME:-$CACHE_ROOT/huggingface}"
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+export HF_HOME="${EVAL_HF_HOME:-$CACHE_ROOT/huggingface}"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export OPENPI_DATA_HOME="${OPENPI_DATA_HOME:-$CACHE_ROOT/openpi-assets}"
 export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-$CACHE_ROOT/jax-compilation-cache}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.80}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
-export WARP_CACHE_PATH="${WARP_CACHE_PATH:-$ABC_ROOT/cache/warp}"
+export WARP_CACHE_PATH="${WARP_CACHE_PATH:-$REPO_ROOT/outputs/cache/warp}"
 export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,$SERVER_HOST"
 export no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,$SERVER_HOST"
 export PYTHONUNBUFFERED=1
@@ -89,7 +128,7 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 [[ -x "$OPENPI_PYTHON" ]] || { echo "ERROR: missing OpenPI Python: $OPENPI_PYTHON" >&2; exit 2; }
 [[ -x "$SIM_PYTHON" ]] || { echo "ERROR: missing simulator Python: $SIM_PYTHON" >&2; exit 2; }
-[[ -f "$CHECKPOINT/_CHECKPOINT_METADATA" ]] || {
+[[ -f "$CHECKPOINT/params/_METADATA" ]] || {
     echo "ERROR: incomplete/missing checkpoint: $CHECKPOINT" >&2
     exit 2
 }
@@ -137,7 +176,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cd "$OPENPI_ROOT"
-"$OPENPI_PYTHON" "$SERVER_SCRIPT" \
+"$OPENPI_PYTHON" "$REPO_ROOT/slurm/exec_without_thp.py" "$OPENPI_PYTHON" "$SERVER_SCRIPT" \
     --host "$SERVER_HOST" \
     --port "$SERVER_PORT" \
     --config "$CONFIG_NAME" \

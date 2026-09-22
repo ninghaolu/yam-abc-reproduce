@@ -26,6 +26,55 @@ def atomic_json(path, value):
     temp.replace(path)
 
 
+def prepare_run(output, checkpoint_run, interval, val_root, batch_size, num_workers):
+    """Freeze a single pi0.5 run, using each checkpoint's saved statistics."""
+    if (output / "manifest.json").exists():
+        raise FileExistsError("A sweep manifest already exists; use a new output directory")
+    if interval <= 0 or batch_size <= 0 or num_workers < 0:
+        raise ValueError("interval/batch_size must be positive and num_workers nonnegative")
+    if not (val_root / "meta/info.json").is_file():
+        raise FileNotFoundError(val_root / "meta/info.json")
+    entries = []
+    for checkpoint in sorted(checkpoint_run.resolve().iterdir(), key=lambda p: int(p.name) if p.name.isdigit() else -1):
+        if not checkpoint.is_dir() or not checkpoint.name.isdigit():
+            continue
+        step = int(checkpoint.name)
+        if step <= 0 or step % interval:
+            continue
+        if not (checkpoint / "params/_METADATA").is_file():
+            raise ValueError(f"Checkpoint lacks finalized params metadata: {checkpoint}")
+        stats_paths = sorted((checkpoint / "assets").glob("*/norm_stats.json"))
+        if len(stats_paths) != 1:
+            raise ValueError(f"Ambiguous checkpoint stats: {checkpoint}")
+        stats = stats_paths[0]
+        entries.append({
+            "id": f"pi05_all_data_{step}", "group": "pi05_all_data", "step": step,
+            "checkpoint": str(checkpoint), "checkpoint_norm_stats": str(stats),
+            "norm_stats_path": str(stats),
+            "norm_stats_sha256": hashlib.sha256(stats.read_bytes()).hexdigest(),
+            "action_horizon": 50,
+        })
+    if not entries:
+        raise ValueError(f"No checkpoints at interval {interval} under {checkpoint_run}")
+    manifest = {
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "task_name": TASK, "val_repo_id": "abc_130k_v3_val",
+        "val_root": str(val_root.resolve()), "batch_size": batch_size,
+        "num_workers": num_workers, "num_denoising_steps": 10, "seed": 0,
+        "checkpoints": entries,
+    }
+    atomic_json(output / "manifest.json", manifest)
+    (output / "README.md").write_text(
+        f"# Bottles validation sweep\n\nTask: {TASK}. Checkpoint interval: {interval}.\n"
+        "Uses each checkpoint's saved global normalization statistics and EMA/inference parameters.\n"
+        "Computes native validation flow loss plus sampled action error with ten denoising steps.\n"
+        "Fixed seed 0; final incomplete batch dropped. Physical joint/gripper RMSE and normalized MSE "
+        "are collected in checkpoint_metrics.csv/tsv. Capped evaluations live separately in smoke/.\n"
+    )
+    collect(output)
+    print(json.dumps(manifest, indent=2))
+
+
 def prepare(output):
     if (output / "manifest.json").exists():
         raise FileExistsError("A sweep manifest already exists; use a new output directory")
@@ -269,10 +318,18 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--index", type=int)
     parser.add_argument("--max-batches", type=int)
+    parser.add_argument("--checkpoint-run", type=Path, help="Prepare only this pi0.5 run; omit for the legacy comparison")
+    parser.add_argument("--interval", type=int, default=8000)
+    parser.add_argument("--val-root", type=Path, default=Path("/projects/data/datasets/abc_130k_v3_val"))
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--num-workers", type=int, default=2)
     args = parser.parse_args()
     output = args.output_dir.resolve()
     if args.action == "prepare":
-        prepare(output)
+        if args.checkpoint_run:
+            prepare_run(output, args.checkpoint_run, args.interval, args.val_root, args.batch_size, args.num_workers)
+        else:
+            prepare(output)
     elif args.action == "collect":
         print(json.dumps(collect(output), indent=2))
     else:

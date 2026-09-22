@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 
 #SBATCH --job-name=pi05_abc_valerr
-#SBATCH --chdir=/projects/work/yang-lab/projects/policy-finetuning/yam-abc-reproduce/third_party/policy/openpi
-#SBATCH --account=torch_pr_147_courant
-#SBATCH --output=/projects/work/yang-lab/projects/policy-finetuning/policy-finetuning-logs/eval-action-error/slurm-%j.out
-#SBATCH --error=/projects/work/yang-lab/projects/policy-finetuning/policy-finetuning-logs/eval-action-error/slurm-%j.err
+#SBATCH --chdir=/home/alex/policy-finetuning/yam-abc-reproduce/third_party/policy/openpi
+#SBATCH --partition=defq
+#SBATCH --exclude=cld2-bom-comp004
+#SBATCH --output=/home/alex/policy-finetuning/policy-finetuning-logs/eval-action-error/slurm-%j.out
+#SBATCH --error=/home/alex/policy-finetuning/policy-finetuning-logs/eval-action-error/slurm-%j.err
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:h200:1
+#SBATCH --gres=gpu:1
 #SBATCH --tasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=200GB
@@ -18,7 +19,7 @@
 # training loop and does not write into the checkpoint directory.
 #
 # One-time setup before sbatch:
-#   mkdir -p /projects/work/yang-lab/projects/policy-finetuning/policy-finetuning-logs/eval-action-error
+#   mkdir -p /home/alex/policy-finetuning/policy-finetuning-logs/eval-action-error
 #
 # Check the episode selection without a GPU (safe on a login node):
 #   DRY_RUN=1 bash slurm/eval_abc_pi05_action_error.bash
@@ -39,34 +40,34 @@
 
 set -euo pipefail
 
-REPO_ROOT="/projects/work/yang-lab/projects/policy-finetuning/yam-abc-reproduce"
+REPO_ROOT="/home/alex/policy-finetuning/yam-abc-reproduce"
 OPENPI_DIR="${REPO_ROOT}/third_party/policy/openpi"
 PYTHON="${REPO_ROOT}/.venv/bin/python"
-# TorchCodec loads FFmpeg through its shared libraries, not through the ffmpeg
-# executable on PATH.  The cluster's FFmpeg 6 lives in the base Conda prefix
-# while this job runs Python from the project venv.
-FFMPEG_LIB_DIR="${FFMPEG_LIB_DIR:-/scratch/nl2752/miniconda3/lib}"
+# Activation supplies the project-local FFmpeg shared libraries for TorchCodec.
+source "${REPO_ROOT}/.venv/bin/activate"
 
-CACHE_ROOT="${CACHE_ROOT:-/projects/work/yang-lab/projects/policy-finetuning/openpi-cache}"
-export HF_HOME="${HF_HOME:-${CACHE_ROOT}/huggingface}"
+CACHE_ROOT="${CACHE_ROOT:-/home/alex/policy-finetuning/openpi-cache}"
+export HF_HOME="${EVAL_HF_HOME:-${CACHE_ROOT}/huggingface}"
 export HF_DATASETS_CACHE="${HF_HOME}/datasets"
-export HF_LEROBOT_HOME="/projects/work/yang-lab/projects/pretrain_world_model"
+export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-/projects/data/datasets}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export OPENPI_DATA_HOME="${OPENPI_DATA_HOME:-${CACHE_ROOT}/openpi-assets}"
 export PYTHONUNBUFFERED=1
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.9}"
-export LD_LIBRARY_PATH="${FFMPEG_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+if [[ -n "${FFMPEG_LIB_DIR:-}" ]]; then
+    export LD_LIBRARY_PATH="${FFMPEG_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+fi
 # See the note in finetune_abc_pi05_yam.bash: LeRobot's default 32-decoder cache
 # buys nothing here and only adds memory pressure.
 export LEROBOT_DECODER_CACHE_SIZE="${LEROBOT_DECODER_CACHE_SIZE:-4}"
 
 BASE_CONFIG="${BASE_CONFIG:-pi05_abc130k}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-${OPENPI_DIR}/checkpoints/pi05_abc130k_task/pi05_abc_put_the_plastic_bottles_in_the_bin_17183582/4000}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-/projects/data/datasets/checkpoints/pi05_abc130k/pi05_abc130k_all_data_lr1e-5_91/8000}"
 TASK_NAME="${TASK_NAME:-put the plastic bottles in the bin}"
 VAL_REPO_ID="${VAL_REPO_ID:-abc_130k_v3_val}"
-VAL_ROOT="${VAL_ROOT:-/projects/work/yang-lab/projects/pretrain_world_model/abc_130k_v3_val}"
+VAL_ROOT="${VAL_ROOT:-/projects/data/datasets/abc_130k_v3_val}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
-NUM_WORKERS="${NUM_WORKERS:-8}"
+NUM_WORKERS="${NUM_WORKERS:-2}"
 NUM_DENOISING_STEPS="${NUM_DENOISING_STEPS:-10}"
 # Fixes the flow-matching noise, so two checkpoints scored with the same seed are
 # directly comparable.
@@ -128,11 +129,11 @@ echo "norm_stats_path=${NORM_STATS_PATH:-auto-from-checkpoint}"
 echo "============================================================"
 
 if [[ "${DRY_RUN}" == "1" ]]; then
-    JAX_PLATFORMS=cpu "${PYTHON}" "${REPO_ROOT}/scripts/eval_action_error.py" "${EVAL_ARGS[@]}" --dry-run
+    JAX_PLATFORMS=cpu "${PYTHON}" "${REPO_ROOT}/slurm/exec_without_thp.py" "${PYTHON}" "${REPO_ROOT}/scripts/eval_action_error.py" "${EVAL_ARGS[@]}" --dry-run
     echo "Dry run completed; the model was not loaded."
     exit 0
 fi
 
-"${PYTHON}" "${REPO_ROOT}/scripts/eval_action_error.py" "${EVAL_ARGS[@]}"
+"${PYTHON}" "${REPO_ROOT}/slurm/exec_without_thp.py" "${PYTHON}" "${REPO_ROOT}/scripts/eval_action_error.py" "${EVAL_ARGS[@]}"
 
 echo "Evaluation completed successfully."
